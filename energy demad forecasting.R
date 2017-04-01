@@ -1,0 +1,249 @@
+
+###########################ENERGY DEMAND FORECASTING #######################
+############################################################################
+### Synopsis
+###The objective of this analysis is to develop a mathematical model for energy demand forecasting in Spain.
+###The model should be able to predict tomorrow’s demand having data of the daily demand the days before.
+###The research is done using the R programming language and all the data and code needed to reproduce the study is provided within this document to ensure fully reproducible research.
+
+##The data is available here:
+
+dataurl <- 'https://gist.githubusercontent.com/Peque/715e91350f0e68e3342f/raw/d28312ac0e49888a5079fcea188770acaf3aa4a2/mme.csv'
+
+##It is a CSV file with values of the daily energy demand (in GWh) between 2004 and 2012. 
+##This data has been divided in two sets:
+##A set to create the model, containing the data between 20014 and 2010.
+##A set to calculate the forecasting error, with the data of 2011 and 2012.
+
+### The source code of this \(Rmd\) file is available on Github:
+  
+#######  https://github.com/Peque/peque/blob/master/etsii/mme/mme.Rmd
+
+####The following extra packages have been used for the analysis:
+  
+####install.packages("xts")
+library(xts)
+library(ggplot2)
+library(forecast)
+
+
+##########################Exploratory data analysis####################
+###Downloading the data:
+
+# Downloading and loading data into memory
+tmp <- tempfile()
+download.file(dataurl, tmp, method = 'curl')
+df <- read.csv(tmp)
+unlink(tmp)
+
+### For later use, the dataframe is formatted and completed with extra information gotten from the raw data. 
+### Dates are converted to POSIX format and new columns are added containing information about the day of the week and the day of the year.
+
+# Convert date strings to POSIX dates
+df$date <- strptime(df$date, format = '%d-%m-%y')
+# Day of the week
+df$day <- as.factor(strftime(df$date, format = '%A'))
+# Day of the year
+df$yearday <- as.factor(strftime(df$date, format = '%m%d'))
+# Final structure for the study
+str(df)
+
+df_test <- subset(df, date >= strptime('01-01-2011', format = '%d-%m-%Y'))
+df <- subset(df, date < strptime('01-01-2011', format = '%d-%m-%Y'))
+ts <- ts(df$demand, frequency = 1)
+
+# Dataframe and time series objects
+demandts <- xts(df$demand, df$date)
+plot(demandts, main = 'Energy demand evolution', xlab = 'Date', ylab = 'Demand (GWh)')
+
+# Demand by day of the week
+ggplot(df, aes(day, demand)) + geom_boxplot() + xlab('Day') + ylab('Demand (GWh)') + ggtitle('Demand per day of the week')
+
+# Aggregating demand by day of the year (average)
+avg_demand_per_yearday <- aggregate(demand ~ yearday, df, 'mean')
+
+# Computing the smooth curve for the time series. Data is replicated before computing the curve in order to achieve continuity
+smooth_yearday <- rbind(avg_demand_per_yearday, avg_demand_per_yearday, avg_demand_per_yearday, avg_demand_per_yearday, avg_demand_per_yearday)
+smooth_yearday <- lowess(smooth_yearday$demand, f = 1 / 45)
+l <- length(avg_demand_per_yearday$demand)
+l0 <- 2 * l + 1
+l1 <- 3 * l
+smooth_yearday <- smooth_yearday$y[l0:l1]
+
+# Plotting the result
+par(mfrow = c(1, 1))
+# Setting year to 2000 to allow existence of 29th February
+dates <- as.Date(paste(levels(df$yearday), '2000'), format = '%m%d%Y')
+plot(dates, avg_demand_per_yearday$demand, type = 'l', main = 'Average daily demand', xlab = 'Date', ylab = 'Demand (GWh)')
+lines(dates, smooth_yearday, col = 'blue', lwd = 2)
+
+
+par(mfrow = c(1, 2))
+diff <- avg_demand_per_yearday$demand - smooth_yearday
+abs_diff <- abs(diff)
+barplot(diff[order(-abs_diff)], main = 'Smoothing error', ylab = 'Error')
+boxplot(diff, main = 'Smoothing error', ylab = 'Error')
+
+head(strftime(dates[order(-abs_diff)], format = '%B %d'), 10)
+
+
+par(mfrow = c(2, 2))
+acf(df$demand, 100, main = 'Autocorrelation')
+acf(df$demand, 1500, main = 'Autocorrelation')
+pacf(df$demand, 100, main = 'Partial autocorrelation')
+pacf(df$demand, 1500, main = 'Partial autocorrelation')
+
+#Decomposition of the weekly seasonal time series.
+wts <- ts(ts, frequency = 7)
+dec_wts <- decompose(wts)
+plot(dec_wts)
+
+# Demand minus week seasonal
+df$demand_mws <- df$demand - as.numeric(dec_wts$season)
+
+yts <- ts(subset(df, yearday != '0229')$demand_mws, frequency = 365)
+dec_yts <- decompose(yts)
+plot(dec_yts)
+
+days365 <- which(df$yearday != '0229')
+february29ths <- which(df$yearday == '0229')
+df$demand_mwys[days365] <- df$demand_mws[days365] - as.numeric(dec_yts$season)
+# Fill values on February 29th
+df$demand_mwys[february29ths] <- df$demand_mws[february29ths]
+
+# A new time series is formed out of the original observation minus the weekly and the yearly seasonal data:
+  par(mfrow = c(1, 1))
+ts_mwys <- ts(df$demand_mwys, frequency = 1)
+demandts_mwys <- xts(df$demand_mwys, df$date)
+plot(demandts_mwys, main = 'Energy demand minus seasonal data', xlab = 'Date', ylab = 'Demand (GWh)')
+
+#Plotting the average daily demand of the demand minus the seasonal data shows a new error rate much lower than the one seen before:
+  # Aggregating demand by day of the year (average)
+  avg_demand_mwys_per_yearday <- aggregate(demand_mwys ~ yearday, df, 'mean')
+
+# Computing the smooth curve for the time series. Data is replicated before computing the curve in order to achieve continuity
+smooth_yearday <- rbind(avg_demand_mwys_per_yearday, avg_demand_mwys_per_yearday, avg_demand_mwys_per_yearday, avg_demand_mwys_per_yearday, avg_demand_mwys_per_yearday)
+smooth_yearday <- lowess(smooth_yearday$demand_mwys, f = 1 / 45)
+l <- length(avg_demand_mwys_per_yearday$demand_mwys)
+l0 <- 2 * l + 1
+l1 <- 3 * l
+smooth_yearday <- smooth_yearday$y[l0:l1]
+
+# Plotting the result
+par(mfrow = c(1, 1))
+# Setting year to 2000 to allow existence of 29th February
+dates <- as.Date(paste(levels(df$yearday), '2000'), format = '%m%d%Y')
+plot(dates, avg_demand_mwys_per_yearday$demand_mwys, type = 'l', main = 'Average daily demand', xlab = 'Date', ylab = 'Demand (GWh)')
+lines(dates, smooth_yearday, col = 'blue', lwd = 2)
+
+# New errors:
+  par(mfrow = c(1, 2))
+diff <- avg_demand_mwys_per_yearday$demand_mwys - smooth_yearday
+abs_diff <- abs(diff)
+barplot(diff[order(-abs_diff)], main = 'Smoothing error', ylab = 'Error')
+boxplot(diff, main = 'Smoothing error', ylab = 'Error')
+
+#The new ACF and PACF are as follow now:
+  par(mfrow = c(1, 2))
+acf(df$demand_mwys, 100, main = 'Autocorrelation')
+pacf(df$demand_mwys, 100, main = 'Partial autocorrelation')
+
+#=====================================
+#=====================================
+#####SARIMA model#######
+##The initial ARIMA parameters have been found using the R \(auto.arima()\) function. 
+##The differencing parameter \(d\) is selected using the KPSS test.
+##If the null hypothesis of stationarity is accepted when the KPSS is applied to the original time series,
+##then \(d = 0\). Otherwise, the series is differenced until the KPSS accepts the null hypothesis.
+##After that, \(p\) and \(q\) are selected using either AIC or BIC.
+##The SARIMA model has been created using those ARIMA parameters.
+
+model <- Arima(ts, order = c(2, 1, 2), list(order = c(1, 1, 1), period = 7))
+
+##Forecasting error can be calculated iterating through the test data frame:
+  auxts <- ts
+auxmodel <- model
+errs <- c()
+pred <- c()
+perc <- c()
+for (i in 1:nrow(df_test)) {
+  p <- as.numeric(predict(auxmodel, newdata = auxts, n.ahead = 1)$pred)
+  pred <- c(pred, p)
+  errs <- c(errs, p - df_test$demand[i])
+  perc <- c(perc, (p - df_test$demand[i]) / df_test$demand[i])
+  auxts <- ts(c(auxts, df_test$demand[i]), frequency = 7)
+  auxmodel <- Arima(auxts, model = auxmodel)
+}
+par(mfrow = c(1, 1))
+plot(errs, type = 'l', main = 'Error in the forecast')
+
+plot(pred, type = 'l', main = 'Real vs. forecast', col = 'red')
+lines(df_test$demand)
+legend('topright', c('Real', 'Forecast'), lty = 1, col = c('black', 'red'))
+
+abserr <- mean(abs(errs))
+percerr <- mean(abs(perc)) * 100
+
+##The mean error across the test data frame is 15.3329 GWh (2.299%).
+##As it was shown before, some special days present less demand than others. 
+##Those days me be taken into account in order to reduce the error:
+
+specialday <- function(day) {
+  correction = 0
+  if (format(day, '%m%d') %in% c('0101', '0501', '0106', '0815', '1012', '1101', '1206', '1208', '1224', '1225', '1226', '1231'))
+    correction = -100
+  else if (format(day, '%m%d') %in% c('0319'))
+    correction = -50
+  # On Sunday, do not apply correction
+  if (as.factor(strftime(day, format = '%A')) == 'Sunday')
+    return(0)
+  return(correction)
+}
+
+model <- Arima(ts, order = c(2, 1, 2), list(order = c(1, 1, 1), period = 7))
+auxts <- ts
+auxmodel <- model
+errs <- c()
+pred <- c()
+perc <- c()
+for (i in 1:nrow(df_test)) {
+  p <- as.numeric(predict(auxmodel, newdata = auxts, n.ahead = 1)$pred)
+  correction = specialday(df_test$date[i])
+  pred <- c(pred, p + correction)
+  errs <- c(errs, p + correction - df_test$demand[i])
+  perc <- c(perc, (p + correction - df_test$demand[i]) / df_test$demand[i])
+  if (!correction)
+    auxts <- ts(c(auxts, df_test$demand[i]), frequency = 7)
+  else
+    auxts <- ts(c(auxts, p), frequency = 7)
+  auxmodel <- Arima(auxts, model = auxmodel)
+}
+par(mfrow = c(1, 1))
+plot(errs, type = 'l', main = 'Error in the forecast')
+
+
+
+plot(pred, type = 'l', main = 'Real vs. forecast', col = 'red')
+lines(df_test$demand)
+legend('topright', c('Real', 'Forecast'), lty = 1, col = c('black', 'red'))
+
+
+abserr <- mean(abs(errs))
+percerr <- mean(abs(perc)) * 100
+
+### The new mean error across the test data frame is 13.1724 GWh (1.9566%).
+
+#####################################################
+#####################################################
+
+#######Forecast####
+### An example of the model’s forecast capabilities:
+
+plot(forecast(Arima(tail(ts, 200), model = model)))
+
+
+
+#####References
+### R. H. Shumway, D. S. Stoffer. Time Series Analysis and Its Applications. 2010.
+### R. J. Hyndman. Forecasting: principles and practice. 2013.
+### P. S. P. Cowpertwait, A. V. Metcalfe. Introductory Time Series with R. 2009.
